@@ -474,6 +474,126 @@ app.get('/api/active-games', async (c) => {
   return c.json({ ok: true, games });
 });
 
+
+
+// ── 管理员: 补录对局页面 ──
+app.get('/admin/match/new', requireLogin, requireAdmin, async (c) => {
+  const props = await layoutProps(c);
+  const players = await c.env.DB.prepare('SELECT battle_tag, display_name FROM league_players ORDER BY display_name').all();
+  return c.html(Layout({
+    ...props,
+    title: `补录对局 — ${props.siteName}`,
+    children: renderMatchEdit({ match: null, players: players.results || [], editMode: false }),
+  }));
+});
+
+// ── 管理员: 编辑对局页面 ──
+app.get('/admin/match/:uuid/edit', requireLogin, requireAdmin, async (c) => {
+  const props = await layoutProps(c);
+  const uuid = c.req.param('uuid');
+  const db = c.env.DB;
+  const match = await db.prepare('SELECT * FROM league_matches WHERE game_uuid = ?').bind(uuid).first();
+  if (!match) return c.html(Layout({ ...props, title: '404', children: html`<div class="text-center py-12 text-hearth-dim">对局不存在</div>` }));
+
+  const matchPlayers = await db.prepare(
+    'SELECT * FROM match_players WHERE match_id = ? ORDER BY placement ASC NULLS LAST'
+  ).bind((match as any).id).all();
+
+  const allPlayers = await db.prepare('SELECT battle_tag, display_name FROM league_players ORDER BY display_name').all();
+
+  return c.html(Layout({
+    ...props,
+    title: `编辑对局 — ${props.siteName}`,
+    children: renderMatchEdit({
+      match: { ...(match as any), players: matchPlayers.results || [] },
+      players: allPlayers.results || [],
+      editMode: true,
+    }),
+  }));
+});
+
+// ── 管理员 API: 创建补录对局 ──
+app.post('/api/admin/match/create', requireLogin, requireAdmin, async (c) => {
+  const body = await c.req.json();
+  const { players, tournamentGroupId, season } = body;
+  if (!players || !Array.isArray(players) || players.length < 2 || players.length > 8) {
+    return c.json({ ok: false, error: '对局需要 2-8 名选手' });
+  }
+
+  const db = c.env.DB;
+  const gameUuid = generateUuid();
+  const now = nowIso();
+
+  let scoringRule: number[] | null = null;
+  if (tournamentGroupId) {
+    const tg = await db.prepare('SELECT scoring_rule FROM tournament_groups WHERE id = ?').bind(tournamentGroupId).first();
+    if (tg && (tg as any).scoring_rule) {
+      try { scoringRule = JSON.parse((tg as any).scoring_rule); } catch {}
+    }
+  }
+
+  const matchResult = await db.prepare(
+    'INSERT INTO league_matches (game_uuid, tournament_group_id, season, status, started_at, ended_at, manual_record) VALUES (?, ?, ?, ?, ?, ?, 1)'
+  ).bind(gameUuid, tournamentGroupId || null, season || null, 'completed', now, now).run();
+
+  const matchId = matchResult.meta.last_row_id;
+
+  for (const p of players) {
+    const points = calcPoints(p.placement, scoringRule);
+    await db.prepare(
+      'INSERT INTO match_players (match_id, battle_tag, account_id_lo, display_name, hero_card_id, hero_name, placement, points) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).bind(matchId, p.battleTag || null, p.accountIdLo || null, p.displayName || '', p.heroCardId || null, p.heroName || null, p.placement, points).run();
+  }
+
+  return c.json({ ok: true, gameUuid });
+});
+
+// ── 管理员 API: 编辑对局排名 ──
+app.put('/api/admin/match/:uuid/edit-placement', requireLogin, requireAdmin, async (c) => {
+  const uuid = c.req.param('uuid');
+  const { placements } = await c.req.json();
+  if (!placements || !Array.isArray(placements)) return c.json({ ok: false, error: '缺少排名数据' });
+
+  const db = c.env.DB;
+  const match = await db.prepare('SELECT * FROM league_matches WHERE game_uuid = ?').bind(uuid).first();
+  if (!match) return c.json({ ok: false, error: '对局不存在' });
+
+  let scoringRule: number[] | null = null;
+  if ((match as any).tournament_group_id) {
+    const tg = await db.prepare('SELECT scoring_rule FROM tournament_groups WHERE id = ?').bind((match as any).tournament_group_id).first();
+    if (tg && (tg as any).scoring_rule) {
+      try { scoringRule = JSON.parse((tg as any).scoring_rule); } catch {}
+    }
+  }
+
+  for (const p of placements) {
+    if (p.placement == null) continue;
+    const points = calcPoints(p.placement, scoringRule);
+    await db.prepare(
+      'UPDATE match_players SET placement = ?, points = ? WHERE match_id = ? AND id = ?'
+    ).bind(p.placement, points, (match as any).id, p.playerId).run();
+  }
+
+  return c.json({ ok: true });
+});
+
+// ── 管理员 API: 修改英雄 ──
+app.put('/api/admin/match/:uuid/update-hero', requireLogin, requireAdmin, async (c) => {
+  const uuid = c.req.param('uuid');
+  const { playerId, heroCardId, heroName } = await c.req.json();
+  if (!playerId) return c.json({ ok: false, error: '缺少 playerId' });
+
+  const db = c.env.DB;
+  const match = await db.prepare('SELECT * FROM league_matches WHERE game_uuid = ?').bind(uuid).first();
+  if (!match) return c.json({ ok: false, error: '对局不存在' });
+
+  await db.prepare(
+    'UPDATE match_players SET hero_card_id = ?, hero_name = ? WHERE match_id = ? AND id = ?'
+  ).bind(heroCardId || null, heroName || null, (match as any).id, playerId).run();
+
+  return c.json({ ok: true });
+});
+
 // ── 静态资源 ──
 app.get('/public/*', async (c) => {
   return c.text('Not Found', 404);
@@ -969,6 +1089,291 @@ function renderEnroll({ enrollments, settings, currentUser }: any) {
         else await showAlert(data.error || '操作失败');
       } catch { await showAlert('网络错误'); }
     }
+    </script>
+  `;
+}
+
+// ── 补录/编辑对局 ──
+function renderMatchEdit({ match, players, editMode }: any) {
+  const allPlayersJson = JSON.stringify(players);
+  const matchJson = JSON.stringify(match);
+  const HERO_COUNT = 8;
+
+  // 构建玩家行
+  const rows: any[] = [];
+  if (editMode && match?.players) {
+    for (const p of match.players) {
+      rows.push({
+        playerId: p.id,
+        battleTag: p.battle_tag || '',
+        displayName: p.display_name || p.battle_tag || '',
+        heroCardId: p.hero_card_id || '',
+        heroName: p.hero_name || '',
+        placement: p.placement,
+        locked: false,
+      });
+    }
+  }
+  // 补齐到 8 行
+  while (rows.length < HERO_COUNT) {
+    rows.push({
+      playerId: null,
+      battleTag: '',
+      displayName: '',
+      heroCardId: '',
+      heroName: '',
+      placement: null,
+      locked: false,
+    });
+  }
+
+  const rowsJson = JSON.stringify(rows);
+
+  return html`
+    <div class="max-w-2xl mx-auto">
+      <div class="bg-hearth-card rounded-xl gold-border overflow-hidden">
+        <div class="px-4 sm:px-6 py-3 sm:py-4 border-b border-hearth-border flex items-center justify-between">
+          <h2 class="text-lg font-bold text-hearth-gold">${editMode ? '✏️ 修改排名' : '✏️ 补录排名'}</h2>
+          ${editMode && match ? html`<div class="text-xs text-hearth-dim">${match.ended_at || match.started_at || ''}</div>` : ''}
+        </div>
+
+        <div class="px-4 sm:px-6 py-3 bg-yellow-500/10 border-b border-hearth-border text-sm text-yellow-300 text-center">
+          ${editMode ? '⚠️ 修改模式：所有排名可修改，提交后自动重算' : '👑 管理员模式：补录所有玩家的排名'}
+        </div>
+
+        <div class="divide-y divide-hearth-border" id="players-list"></div>
+
+        <div class="px-4 sm:px-6 py-3 sm:py-4 border-t border-hearth-border flex items-center justify-between">
+          <div id="error-msg" class="text-sm text-red-400 hidden"></div>
+          <button id="submitBtn" onclick="submitPlacements()"
+            class="ml-auto px-6 py-2.5 rounded-lg font-bold text-sm transition bg-hearth-gold/20 text-hearth-gold hover:bg-hearth-gold/30 active:scale-[0.98]">
+            提交排名
+          </button>
+        </div>
+      </div>
+
+      <div class="mt-4 text-center">
+        <a href="/admin" class="text-sm text-hearth-gold hover:underline">← 返回管理面板</a>
+      </div>
+    </div>
+
+    <!-- 英雄编辑弹窗 -->
+    <div id="hero-edit-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-[60]" onclick="if(event.target===this)this.classList.add('hidden')">
+      <div class="bg-hearth-card rounded-xl gold-border p-6 w-full max-w-sm" onclick="event.stopPropagation()">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-sm font-bold text-hearth-gold">🎮 修改英雄</h3>
+          <button onclick="document.getElementById('hero-edit-modal').classList.add('hidden')" class="text-hearth-dim hover:text-white transition text-lg">✕</button>
+        </div>
+        <div class="text-xs text-hearth-dim mb-3" id="he-player-name"></div>
+        <input type="text" id="he-search" class="w-full bg-black/30 border border-hearth-border rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-hearth-dim focus:outline-none focus:border-hearth-gold/50 mb-2" placeholder="输入英雄名搜索...">
+        <div id="he-list" class="max-h-52 overflow-y-auto divide-y divide-hearth-border/50"></div>
+        <input type="hidden" id="he-row-idx" value="">
+      </div>
+    </div>
+
+    <script>
+    const ALL_PLAYERS = ${allPlayersJson};
+    const EDIT_MODE = ${editMode ? 'true' : 'false'};
+    const GAME_UUID = ${editMode && match ? JSON.stringify(match.game_uuid) : 'null'};
+    let playerRows = ${rowsJson};
+    let _heroList = null;
+
+    // ── 渲染玩家行 ──
+    function renderRows() {
+      const container = document.getElementById('players-list');
+      container.innerHTML = playerRows.map((row, i) => {
+        const avatarHtml = row.heroCardId
+          ? '<img src="https://art.hearthstonejson.com/v1/256x/' + row.heroCardId + '.jpg" alt="' + row.heroName + '" title="' + row.heroName + '" class="w-[150%] h-[150%] object-cover" onerror="this.closest(\\'div\\').style.display=\\'none\\'">'
+          : '<div class="w-full h-full flex items-center justify-center text-hearth-dim text-xs">?</div>';
+        const editBtn = EDIT_MODE
+          ? '<button onclick="toggleHeroEdit(' + i + ')" title="修改英雄" class="absolute top-0 left-0 w-4 h-4 sm:w-5 sm:h-5 bg-black/70 rounded-br flex items-center justify-center text-[8px] sm:text-[10px] text-hearth-gold hover:bg-hearth-gold/30 transition z-10 cursor-pointer leading-none">✏️</button>'
+          : '<button onclick="toggleHeroEdit(' + i + ')" title="选择英雄" class="absolute top-0 left-0 w-4 h-4 sm:w-5 sm:h-5 bg-black/70 rounded-br flex items-center justify-center text-[8px] sm:text-[10px] text-hearth-gold hover:bg-hearth-gold/30 transition z-10 cursor-pointer leading-none">🎮</button>';
+
+        // 玩家选择器
+        let playerSelect;
+        if (EDIT_MODE) {
+          playerSelect = '<div class="font-medium truncate">' + (row.displayName || row.battleTag || '未知') + '</div>';
+        } else {
+          const options = ALL_PLAYERS.map(p =>
+            '<option value="' + p.battle_tag + '" data-name="' + (p.display_name || p.battle_tag) + '"' +
+            (p.battle_tag === row.battleTag ? ' selected' : '') + '>' +
+            (p.display_name || p.battle_tag) + '</option>'
+          ).join('');
+          playerSelect = '<select data-row="' + i + '" onchange="updatePlayer(' + i + ', this)" class="bg-black/30 border border-hearth-border rounded-lg px-2 py-1.5 text-sm text-gray-200 focus:outline-none focus:border-hearth-gold/50 transition w-full">' +
+            '<option value="">选择选手</option>' + options + '</select>';
+        }
+
+        // 排名下拉
+        let placementSelect;
+        if (row.locked) {
+          placementSelect = '<div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-500/10 border border-green-500/30 text-sm text-green-400 w-24 justify-center"><span>🔒</span><span>第 ' + row.placement + ' 名</span></div>';
+        } else {
+          const pOptions = '<option value="">排名</option>' +
+            [1,2,3,4,5,6,7,8].map(n =>
+              '<option value="' + n + '"' + (row.placement === n ? ' selected' : '') + '>第 ' + n + ' 名</option>'
+            ).join('');
+          placementSelect = '<select data-row="' + i + '" onchange="updatePlacement(' + i + ', this)" class="placement-select bg-black/30 border border-hearth-border rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-hearth-gold/60 transition w-24 text-center">' +
+            pOptions + '</select>';
+        }
+
+        return '<div class="flex items-center gap-3 sm:gap-4 px-4 sm:px-6 py-3 sm:py-4">' +
+          '<div class="hero-avatar relative w-10 h-10 sm:w-12 sm:h-12 rounded-full overflow-hidden flex-shrink-0 bg-hearth-card">' +
+          avatarHtml + editBtn + '</div>' +
+          '<div class="flex-1 min-w-0">' + playerSelect +
+          '<div class="text-xs text-hearth-dim hero-name-text mt-0.5">' + (row.heroName || '') + '</div></div>' +
+          '<div class="flex-shrink-0">' + placementSelect + '</div></div>';
+      }).join('');
+    }
+
+    function updatePlayer(idx, sel) {
+      const tag = sel.value;
+      const opt = sel.selectedOptions[0];
+      playerRows[idx].battleTag = tag;
+      playerRows[idx].displayName = opt?.dataset.name || tag;
+    }
+
+    function updatePlacement(idx, sel) {
+      playerRows[idx].placement = sel.value ? parseInt(sel.value) : null;
+    }
+
+    // ── 英雄编辑 ──
+    async function loadHeroes() {
+      if (_heroList) return _heroList;
+      try {
+        const data = await fetch('/public/bg_heroes.json').then(r => r.json());
+        _heroList = Object.entries(data)
+          .filter(([k]) => !k.includes('SKIN'))
+          .map(([cardId, name]) => ({ cardId, name }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+      } catch { _heroList = []; }
+      return _heroList;
+    }
+
+    function renderHeroList(q) {
+      const heroes = _heroList || [];
+      const matches = q ? heroes.filter(h => h.name.toLowerCase().includes(q.toLowerCase())).slice(0, 15) : heroes.slice(0, 15);
+      const list = document.getElementById('he-list');
+      list.innerHTML = matches.length
+        ? matches.map(h =>
+            '<div class="flex items-center gap-2 px-3 py-2 text-sm text-gray-200 hover:bg-hearth-gold/20 cursor-pointer transition" data-cid="' + h.cardId + '" data-name="' + h.name + '">' +
+            '<img src="https://art.hearthstonejson.com/v1/256x/' + h.cardId + '.jpg" class="w-8 h-8 rounded-full object-cover flex-shrink-0" onerror="this.style.display=\\'none\\'">' +
+            '<span>' + h.name + '</span></div>'
+          ).join('')
+        : '<div class="px-3 py-2 text-sm text-hearth-dim">未找到</div>';
+      list.querySelectorAll('div[data-cid]').forEach(opt => {
+        opt.onclick = () => selectHero(opt.dataset.cid, opt.dataset.name);
+      });
+    }
+
+    async function toggleHeroEdit(idx) {
+      await loadHeroes();
+      document.getElementById('he-row-idx').value = idx;
+      document.getElementById('he-player-name').textContent = playerRows[idx].displayName || '选手 ' + (idx + 1);
+      const search = document.getElementById('he-search');
+      search.value = '';
+      renderHeroList('');
+      document.getElementById('hero-edit-modal').classList.remove('hidden');
+      search.focus();
+    }
+
+    function selectHero(cardId, name) {
+      const idx = parseInt(document.getElementById('he-row-idx').value);
+      playerRows[idx].heroCardId = cardId;
+      playerRows[idx].heroName = name;
+      document.getElementById('hero-edit-modal').classList.add('hidden');
+      renderRows();
+    }
+
+    document.getElementById('he-search').addEventListener('input', function() {
+      renderHeroList(this.value);
+    });
+
+    // ── 提交 ──
+    async function submitPlacements() {
+      document.getElementById('error-msg').classList.add('hidden');
+      const btn = document.getElementById('submitBtn');
+
+      // 校验
+      const validRows = playerRows.filter(r => r.battleTag || r.displayName);
+      if (validRows.length < 2) {
+        showError('至少需要 2 名选手');
+        return;
+      }
+
+      const usedPlacements = new Set();
+      for (const r of validRows) {
+        if (r.placement == null) {
+          showError('"' + (r.displayName || r.battleTag) + '" 未选择排名');
+          return;
+        }
+        if (usedPlacements.has(r.placement)) {
+          showError('第 ' + r.placement + ' 名重复');
+          return;
+        }
+        usedPlacements.add(r.placement);
+      }
+
+      btn.disabled = true;
+      btn.textContent = '提交中...';
+
+      try {
+        if (EDIT_MODE && GAME_UUID) {
+          // 编辑模式：更新排名
+          const placements = validRows.map(r => ({ playerId: r.playerId, placement: r.placement }));
+          const res = await fetch('/api/admin/match/' + encodeURIComponent(GAME_UUID) + '/edit-placement', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ placements }),
+          });
+          const data = await res.json();
+          if (data.ok) {
+            btn.textContent = '✓ 提交成功';
+            btn.className = 'ml-auto px-6 py-2.5 rounded-lg font-bold text-sm bg-green-500/20 text-green-400 cursor-default';
+            setTimeout(() => window.location.reload(), 1000);
+          } else {
+            showError(data.error || '提交失败');
+            btn.disabled = false;
+            btn.textContent = '提交排名';
+          }
+        } else {
+          // 新建模式
+          const players = validRows.map(r => ({
+            battleTag: r.battleTag,
+            displayName: r.displayName,
+            heroCardId: r.heroCardId,
+            heroName: r.heroName,
+            placement: r.placement,
+          }));
+          const res = await fetch('/api/admin/match/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ players }),
+          });
+          const data = await res.json();
+          if (data.ok) {
+            btn.textContent = '✓ 创建成功';
+            btn.className = 'ml-auto px-6 py-2.5 rounded-lg font-bold text-sm bg-green-500/20 text-green-400 cursor-default';
+            setTimeout(() => { window.location.href = '/match/' + data.gameUuid; }, 1000);
+          } else {
+            showError(data.error || '创建失败');
+            btn.disabled = false;
+            btn.textContent = '提交排名';
+          }
+        }
+      } catch (e) {
+        showError('网络错误，请重试');
+        btn.disabled = false;
+        btn.textContent = '提交排名';
+      }
+    }
+
+    function showError(msg) {
+      const el = document.getElementById('error-msg');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    }
+
+    renderRows();
     </script>
   `;
 }
