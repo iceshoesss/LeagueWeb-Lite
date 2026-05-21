@@ -1145,7 +1145,7 @@ function renderAdmin(props: any) {
         '<div class="space-y-3">' +
         '<p class="text-hearth-gold font-bold">录入新对局</p>' +
         '<p class="text-xs text-hearth-dim">请输入对局中每位选手的信息（JSON格式）</p>' +
-        '<textarea id="matchInput" rows="8" class="w-full bg-black/30 border border-hearth-border rounded-lg px-3 py-2 text-xs text-gray-200 font-mono focus:outline-none focus:border-hearth-gold/50" placeholder=\'[{"battleTag":"玩家#1234","displayName":"玩家","placement":1,"heroName":"米尔菲斯","heroCardId":"BG23_HERO_201"}]\'></textarea>' +
+        '<textarea id="matchInput" rows="8" class="w-full bg-black/30 border border-hearth-border rounded-lg px-3 py-2 text-xs text-gray-200 font-mono focus:outline-none focus:border-hearth-gold/50" placeholder=&#39;[{"battleTag":"玩家#1234","displayName":"玩家","placement":1,"heroName":"米尔菲斯","heroCardId":"BG23_HERO_201"}]&#39;></textarea>' +
         '</div>',
         '提交'
       ).then(async (ok) => {
