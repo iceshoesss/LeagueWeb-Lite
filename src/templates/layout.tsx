@@ -164,7 +164,7 @@ export function Layout(props: LayoutProps) {
     };
     </script>
 
-    <div id="confirmModal" class="fixed inset-0 z-[9999] hidden flex items-center justify-center">
+    <div id="confirmModal" class="fixed inset-0 z-[9999] hidden items-center justify-center">
         <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" id="confirmOverlay"></div>
         <div class="relative bg-[#1a1a2e] border border-[#2a2a4a] rounded-xl shadow-2xl max-w-md w-[90%] mx-4 p-6">
             <p id="confirmMsg" class="text-gray-200 text-sm leading-relaxed whitespace-pre-line"></p>
@@ -184,8 +184,10 @@ export function Layout(props: LayoutProps) {
             const overlay = document.getElementById('confirmOverlay');
             msgEl.textContent = msg;
             modal.classList.remove('hidden');
+            modal.classList.add('flex');
             function close(result) {
                 modal.classList.add('hidden');
+                modal.classList.remove('flex');
                 okBtn.onclick = null;
                 cancelBtn.onclick = null;
                 overlay.onclick = null;
@@ -208,8 +210,10 @@ export function Layout(props: LayoutProps) {
             msgEl.innerHTML = html;
             if (okLabel) okBtn.textContent = okLabel;
             modal.classList.remove('hidden');
+            modal.classList.add('flex');
             function close(result) {
                 modal.classList.add('hidden');
+                modal.classList.remove('flex');
                 okBtn.onclick = null;
                 cancelBtn.onclick = null;
                 overlay.onclick = null;
@@ -235,8 +239,10 @@ export function Layout(props: LayoutProps) {
             okBtn.textContent = opts.okLabel || '确定';
             if (opts.okClass) okBtn.className = opts.okClass;
             modal.classList.remove('hidden');
+            modal.classList.add('flex');
             function close() {
                 modal.classList.add('hidden');
+                modal.classList.remove('flex');
                 okBtn.onclick = null;
                 overlay.onclick = null;
                 document.onkeydown = null;
