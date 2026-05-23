@@ -1,0 +1,11 @@
+name = "leagueweb-lite"
+main = "src/index.tsx"
+compatibility_date = "2025-02-01"
+
+[vars]
+JWT_SECRET = "dev-secret-change-in-production"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "leagueweb-lite"
+database_id = "6ea23928-ba15-419c-b07d-4b29ee71e63c"
